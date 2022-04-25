@@ -19,10 +19,15 @@
 
 #include <zmk/rgb_underglow.h>
 
+#include <zmk/event_manager.h>
+#include <zmk/led_indicator.h>
+#include <zmk/events/led_indicator_changed.h>
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define STRIP_LABEL DT_LABEL(DT_CHOSEN(zmk_underglow))
 #define STRIP_NUM_PIXELS DT_PROP(DT_CHOSEN(zmk_underglow), chain_length)
+#define STRIP_INDICATOR_PIXEL DT_PROP(DT_CHOSEN(zmk_underglow), indicator_pixel)
 
 #define HUE_MAX 360
 #define SAT_MAX 100
@@ -44,6 +49,7 @@ struct rgb_underglow_state {
     uint8_t animation_speed;
     uint8_t current_effect;
     uint16_t animation_step;
+    bool inited;
     bool on;
 };
 
@@ -52,6 +58,14 @@ static const struct device *led_strip;
 static struct led_rgb pixels[STRIP_NUM_PIXELS];
 
 static struct rgb_underglow_state state;
+
+#if IS_ENABLED(CONFIG_ZMK_LED_INDICATOR)
+struct rgb_indicator_state {
+    bool underglow_on;
+    bool on;
+};
+static struct rgb_indicator_state indicator_state;
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_EXT_POWER)
 static const struct device *ext_power;
@@ -162,6 +176,16 @@ static void zmk_rgb_underglow_effect_swirl() {
     state.animation_step = state.animation_step % HUE_MAX;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_LED_INDICATOR)
+static void zmk_rgb_underglow_off_except_indicator() {
+    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
+        if (i != STRIP_INDICATOR_PIXEL) {
+            pixels[i] = (struct led_rgb){r : 0, g : 0, b : 0};
+        }
+    }
+}
+#endif
+
 static void zmk_rgb_underglow_tick(struct k_work *work) {
     switch (state.current_effect) {
     case UNDERGLOW_EFFECT_SOLID:
@@ -177,7 +201,13 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
         zmk_rgb_underglow_effect_swirl();
         break;
     }
-
+#if IS_ENABLED(CONFIG_ZMK_LED_INDICATOR)
+    if (!indicator_state.on) {
+        pixels[STRIP_INDICATOR_PIXEL] = (struct led_rgb){r : 0, g : 0, b : 0};
+    } else if (!indicator_state.underglow_on) {
+        zmk_rgb_underglow_off_except_indicator();
+    }
+#endif
     led_strip_update_rgb(led_strip, pixels, STRIP_NUM_PIXELS);
 }
 
@@ -248,7 +278,8 @@ static int zmk_rgb_underglow_init(const struct device *_arg) {
         animation_speed : CONFIG_ZMK_RGB_UNDERGLOW_SPD_START,
         current_effect : CONFIG_ZMK_RGB_UNDERGLOW_EFF_START,
         animation_step : 0,
-        on : IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_ON_START)
+        on : IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_ON_START),
+        inited : true
     };
 
 #if IS_ENABLED(CONFIG_SETTINGS)
@@ -443,5 +474,30 @@ int zmk_rgb_underglow_change_spd(int direction) {
 
     return zmk_rgb_underglow_save_state();
 }
+
+#if IS_ENABLED(CONFIG_ZMK_LED_INDICATOR)
+static int led_indicator_listener(const zmk_event_t *eh) {
+    if (state.inited) {
+        const struct zmk_led_indicator_changed *ev = as_zmk_led_indicator_changed(eh);
+        zmk_leds_flags_t leds = ev->leds;
+        if (leds & ZMK_LED_CAPSLOCK_BIT) {
+            indicator_state.underglow_on = state.on;
+            indicator_state.on = true;
+            if (!indicator_state.underglow_on) {
+                zmk_rgb_underglow_on();
+            }
+        } else {
+            indicator_state.on = false;
+            if (!indicator_state.underglow_on) {
+                zmk_rgb_underglow_off();
+            }
+        }
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+ZMK_LISTENER(led_indicator_listener, led_indicator_listener);
+ZMK_SUBSCRIPTION(led_indicator_listener, zmk_led_indicator_changed);
+#endif
 
 SYS_INIT(zmk_rgb_underglow_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
